@@ -1,0 +1,6 @@
+{
+  "name": "starlark",
+  "command": "npx",
+  "args": ["starlark-mcp", "--extensions-dir", "./extensions"],
+  "env": {}
+}

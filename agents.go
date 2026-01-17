@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/connyay/adk-go-example/state"
 	"github.com/connyay/adk-go-example/toolkit"
@@ -353,31 +354,53 @@ Be concise but thorough. Format with clear sections if the topic is complex.`, s
 	})
 }
 
-func buildGreeterAgent(m model.LLM) (agent.Agent, error) {
+func buildGreeterAgent(m model.LLM, tkReg *toolkit.ToolkitRegistry, mcpToolCount int) (agent.Agent, error) {
+	capabilities := buildCapabilitiesDescription(tkReg, mcpToolCount)
+
+	instruction := fmt.Sprintf(`You are a helpful assistant. The user has sent a greeting or unclear message.
+
+Respond warmly and explain what you can help with based on your current capabilities:
+
+%s
+
+Keep it friendly and concise. Adapt examples to the available toolkits.`, capabilities)
+
 	return llmagent.New(llmagent.Config{
 		Name:        "Greeter",
 		Description: "Handles greetings and unclear requests",
 		Model:       m,
-		Instruction: `You are a helpful research and analysis assistant. The user has sent a greeting or unclear message.
-
-Respond warmly and explain what you can help with:
-
-"Hello! I'm a research and analysis assistant. I can help you:
-
-**Learn about topics:**
-- 'What is quantum computing?'
-- 'Explain machine learning basics'
-
-**Create analysis and reports:**
-- 'Generate a report on renewable energy trends'
-- 'Compare different approaches to data storage'
-- 'Extract key insights from AI research'
-
-What would you like to explore?"
-
-Keep it friendly and concise.`,
-		OutputKey: state.FinalResponse.Key,
+		Instruction: instruction,
+		OutputKey:   state.FinalResponse.Key,
 	})
+}
+
+func buildCapabilitiesDescription(tkReg *toolkit.ToolkitRegistry, mcpToolCount int) string {
+	var sb strings.Builder
+	sb.WriteString("**Available Capabilities:**\n\n")
+
+	for name, config := range tkReg.Toolkits {
+		sb.WriteString(fmt.Sprintf("**%s** - %s\n", capitalize(name), config.Description))
+		if len(config.Strategies) > 0 {
+			sb.WriteString("  Examples:\n")
+			for i, strat := range config.Strategies {
+				if i >= 2 {
+					break // Limit to 2 examples per toolkit
+				}
+				sb.WriteString(fmt.Sprintf("  - %s\n", strat.Description))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	if mcpToolCount > 0 {
+		sb.WriteString(fmt.Sprintf("**External Tools** - %d additional tools from connected MCP servers\n\n", mcpToolCount))
+	}
+
+	sb.WriteString("**Learn about topics:**\n")
+	sb.WriteString("- 'What is quantum computing?'\n")
+	sb.WriteString("- 'Explain machine learning basics'\n")
+
+	return sb.String()
 }
 
 func buildEntityExtractor(m model.LLM) (agent.Agent, error) {
@@ -435,4 +458,11 @@ Generate unique IDs like "entity_12345".
 If no entities to extract, return {"new_entities": [], "default_referent": ""}`, stateDoc),
 		OutputKey: state.ExtractedEntities.Key,
 	})
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

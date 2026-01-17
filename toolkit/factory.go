@@ -8,24 +8,26 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 )
 
-// BuildToolkitAgent builds a single toolkit agent from configuration.
-func BuildToolkitAgent(m model.LLM, config *ToolkitConfig, toolReg *ToolRegistry) (agent.Agent, error) {
+func BuildToolkitAgent(m model.LLM, config *ToolkitConfig, toolReg *ToolRegistry, mcpToolset tool.Toolset) (agent.Agent, error) {
 	tools, err := toolReg.BuildTools(config.Tools)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build tools for toolkit %q: %w", config.Name, err)
 	}
 
 	agentName := fmt.Sprintf("%sToolkit", capitalize(config.Name))
-
-	// Build instruction with state access documentation
 	instruction := buildInstructionWithState(config)
 
-	// Use output_key from config, default to final_response
 	outputKey := config.OutputKey
 	if outputKey == "" {
 		outputKey = state.FinalResponse.Key
+	}
+
+	var toolsets []tool.Toolset
+	if mcpToolset != nil {
+		toolsets = append(toolsets, mcpToolset)
 	}
 
 	return llmagent.New(llmagent.Config{
@@ -34,11 +36,11 @@ func BuildToolkitAgent(m model.LLM, config *ToolkitConfig, toolReg *ToolRegistry
 		Model:       m,
 		Instruction: instruction,
 		Tools:       tools,
+		Toolsets:    toolsets,
 		OutputKey:   outputKey,
 	})
 }
 
-// buildInstructionWithState prepends state access documentation to the instruction.
 func buildInstructionWithState(config *ToolkitConfig) string {
 	if len(config.DependsOn) == 0 {
 		return config.Instruction
@@ -48,12 +50,11 @@ func buildInstructionWithState(config *ToolkitConfig) string {
 	return stateDoc + "\n" + config.Instruction
 }
 
-// BuildAllToolkitAgents builds all toolkit agents from a toolkit registry.
-func BuildAllToolkitAgents(m model.LLM, tkReg *ToolkitRegistry, toolReg *ToolRegistry) (map[string]agent.Agent, error) {
+func BuildAllToolkitAgents(m model.LLM, tkReg *ToolkitRegistry, toolReg *ToolRegistry, mcpToolset tool.Toolset) (map[string]agent.Agent, error) {
 	agents := make(map[string]agent.Agent)
 
 	for name, config := range tkReg.Toolkits {
-		a, err := BuildToolkitAgent(m, config, toolReg)
+		a, err := BuildToolkitAgent(m, config, toolReg, mcpToolset)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build toolkit agent %q: %w", name, err)
 		}

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
 	"log"
 	"strings"
+	"time"
 
+	"github.com/connyay/adk-go-example/mcp"
 	"github.com/connyay/adk-go-example/state"
 	"github.com/connyay/adk-go-example/toolkit"
 	"google.golang.org/adk/agent"
@@ -17,21 +20,23 @@ import (
 )
 
 func buildPipeline(m model.LLM) (agent.Agent, error) {
+	ctx := context.Background()
 	toolReg := toolkit.NewToolRegistry()
 	RegisterAllTools(toolReg)
 
-	tkReg, err := toolkit.LoadToolkits("./toolkits")
+	mcpToolset := mcp.NewDynamicMCPToolset("./mcp-servers")
+	mcpToolset.StartPolling(ctx, 5*time.Second)
+
+	toolkitAgentReg, err := toolkit.NewToolkitAgentRegistry("./toolkits", toolReg, m, mcpToolset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load toolkits: %w", err)
+		return nil, fmt.Errorf("failed to create toolkit agent registry: %w", err)
 	}
+	toolkitAgentReg.StartPolling(ctx, 5*time.Second)
+
+	tkReg := toolkitAgentReg.Configs()
 	log.Printf("[PIPELINE] Loaded %d toolkits: %v", len(tkReg.Toolkits), tkReg.Names())
 
 	SetToolkitRegistry(tkReg)
-
-	toolkits, err := toolkit.BuildAllToolkitAgents(m, tkReg, toolReg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build toolkit agents: %w", err)
-	}
 
 	guardrails, err := buildGuardrailsAgent(m, "GuardrailsAgent", tkReg)
 	if err != nil {
@@ -69,7 +74,7 @@ func buildPipeline(m model.LLM) (agent.Agent, error) {
 		return nil, err
 	}
 
-	greeter, err := buildGreeterAgent(m)
+	greeter, err := buildGreeterAgent(m, tkReg, mcpToolset.ServerCount())
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +108,7 @@ func buildPipeline(m model.LLM) (agent.Agent, error) {
 	}
 
 	subAgents := []agent.Agent{parallelIntake, pivotIntake, orchestrator, pivotOrchestrator, synthesizer, greeter}
-	for _, tkAgent := range toolkits {
+	for _, tkAgent := range toolkitAgentReg.All() {
 		subAgents = append(subAgents, tkAgent)
 	}
 
@@ -113,7 +118,7 @@ func buildPipeline(m model.LLM) (agent.Agent, error) {
 		Description: "A research assistant that searches docs and strategies, then summarizes or executes.",
 		SubAgents:   subAgents,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return runPipeline(ctx, m, tkReg, parallelIntake, pivotIntake, orchestrator, pivotOrchestrator, synthesizer, toolkits, greeter)
+			return runPipeline(ctx, m, toolkitAgentReg, parallelIntake, pivotIntake, orchestrator, pivotOrchestrator, synthesizer, greeter)
 		},
 	})
 	if err != nil {
@@ -125,9 +130,8 @@ func buildPipeline(m model.LLM) (agent.Agent, error) {
 
 func runPipeline(
 	ctx agent.InvocationContext,
-	m model.LLM, tkReg *toolkit.ToolkitRegistry,
+	m model.LLM, toolkitAgentReg *toolkit.ToolkitAgentRegistry,
 	parallelIntake, pivotIntake, orchestrator, pivotOrchestrator, synthesizer agent.Agent,
-	toolkits map[string]agent.Agent,
 	greeter agent.Agent,
 ) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -142,6 +146,8 @@ func runPipeline(
 			return
 		}
 
+		// Get fresh toolkit registry for classifier (reflects hot-loaded changes)
+		tkReg := toolkitAgentReg.Configs()
 		classifier, err := buildIntakeClassifier(m, ctx, tkReg)
 		if err != nil {
 			log.Printf("[PIPELINE] Failed to build classifier: %v", err)
@@ -199,34 +205,30 @@ func runPipeline(
 			log.Printf("[PIPELINE] -> Fast Path (followup to current toolkit)")
 			activeToolkitName := getActiveToolkitName(ctx)
 			if activeToolkitName != "" {
-				toolkit, ok := toolkits[activeToolkitName]
+				toolkitAgent, ok := toolkitAgentReg.Get(activeToolkitName)
 				if !ok {
 					log.Printf("[PIPELINE] Unknown active toolkit %q, falling back to full path", activeToolkitName)
 					runFullPath = true
 				} else {
 					log.Printf("[PIPELINE] -> %s toolkit (continuing)", activeToolkitName)
-					for event, err := range toolkit.Run(ctx) {
+					for event, err := range toolkitAgent.Run(ctx) {
 						if !yield(event, err) {
 							return
 						}
 					}
 					executedToolkit = true
 				}
-			}
-			if !executedToolkit && !runFullPath {
-				log.Printf("[PIPELINE] -> Synthesizer (no active toolkit)")
-				for event, err := range synthesizer.Run(ctx) {
-					if !yield(event, err) {
-						return
-					}
-				}
+			} else {
+				// No active toolkit - this can happen if the prior request didn't complete
+				// Fall back to full path to properly route the request
+				log.Printf("[PIPELINE] No active toolkit for followup, falling back to full path")
+				runFullPath = true
 			}
 
 		case "pivot":
 			// PIVOT PATH: Run guardrails + strategy in parallel, then merge context
 			log.Printf("[PIPELINE] -> Pivot Path (target toolkit: %s)", classification.TargetToolkit)
 
-			// Run pivot intake (guardrails + strategy, no docs)
 			log.Printf("[PIPELINE] Running pivot intake (guardrails + strategy)")
 			var pivotGuardrailsOutput string
 			for event, err := range pivotIntake.Run(ctx) {
@@ -250,13 +252,11 @@ func runPipeline(
 				}
 			}
 
-			// Check guardrails
 			if blocked := checkGuardrailsFromOutput(pivotGuardrailsOutput, yield); blocked {
 				log.Printf("[PIPELINE] Pivot blocked by guardrails")
 				return
 			}
 
-			// Run pivot orchestrator to merge context with strategy
 			log.Printf("[PIPELINE] Running pivot orchestrator")
 			var pivotDecisionOutput string
 			for event, err := range pivotOrchestrator.Run(ctx) {
@@ -280,7 +280,6 @@ func runPipeline(
 				}
 			}
 
-			// Parse pivot decision and route to toolkit
 			var pivotDecision OrchestratorDecision
 			if err := json.Unmarshal([]byte(pivotDecisionOutput), &pivotDecision); err != nil {
 				log.Printf("[PIPELINE] Failed to parse pivot decision: %v, using target from classifier", err)
@@ -304,7 +303,7 @@ func runPipeline(
 				log.Printf("[PIPELINE] No valid target toolkit, running full path")
 				runFullPath = true
 			} else {
-				tk, ok := toolkits[selectedToolkit]
+				tk, ok := toolkitAgentReg.Get(selectedToolkit)
 				if !ok {
 					log.Printf("[PIPELINE] Unknown toolkit %q, running full path", selectedToolkit)
 					runFullPath = true
@@ -327,7 +326,7 @@ func runPipeline(
 			// FULL PATH: parallel intake (guardrails + search) -> check guardrails -> orchestrator -> route
 			log.Printf("[PIPELINE] -> Full Path (new query)")
 
-			// Capture guardrails result from event stream since state isn't committed yet
+			// Capture from event stream since state isn't committed yet
 			log.Printf("[PIPELINE] Running parallel intake (guardrails + searches)")
 			var guardrailsOutput string
 			for event, err := range parallelIntake.Run(ctx) {
@@ -394,10 +393,10 @@ func runPipeline(
 					selectedToolkit = "analysis" // default
 				}
 
-				tk, ok := toolkits[selectedToolkit]
+				tk, ok := toolkitAgentReg.Get(selectedToolkit)
 				if !ok {
 					// Try analysis as fallback, but verify it exists
-					tk, ok = toolkits["analysis"]
+					tk, ok = toolkitAgentReg.Get("analysis")
 					if !ok {
 						log.Printf("[PIPELINE] Unknown toolkit %q and no analysis fallback, using synthesizer", selectedToolkit)
 						for event, err := range synthesizer.Run(ctx) {
@@ -423,7 +422,7 @@ func runPipeline(
 				log.Printf("[PIPELINE] -> Chain execution: %v", decision.ToolkitSequence)
 
 				for i, tkName := range decision.ToolkitSequence {
-					tk, ok := toolkits[tkName]
+					tk, ok := toolkitAgentReg.Get(tkName)
 					if !ok {
 						log.Printf("[PIPELINE] Unknown toolkit %q in chain, skipping", tkName)
 						continue
@@ -512,8 +511,7 @@ func runEntityExtraction(ctx agent.InvocationContext, m model.LLM, yield func(*s
 	}
 }
 
-// checkGuardrailsFromOutput checks the guardrails result from captured output.
-// Returns true if blocked, false if passed.
+// checkGuardrailsFromOutput returns true if blocked, false if passed.
 func checkGuardrailsFromOutput(guardrailsOutput string, yield func(*session.Event, error) bool) bool {
 	if guardrailsOutput == "" {
 		log.Printf("[GUARDRAILS] No output captured, assuming passed")
