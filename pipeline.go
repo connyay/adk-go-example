@@ -186,7 +186,7 @@ func runPipeline(
 		}
 
 		var classification IntakeClassification
-		if err := json.Unmarshal([]byte(classificationOutput), &classification); err != nil {
+		if err := json.Unmarshal([]byte(extractJSON(classificationOutput)), &classification); err != nil {
 			log.Printf("[PIPELINE] Failed to parse classification: %v, defaulting to new_query", err)
 			classification = IntakeClassification{Classification: "new_query"}
 		}
@@ -281,7 +281,7 @@ func runPipeline(
 			}
 
 			var pivotDecision OrchestratorDecision
-			if err := json.Unmarshal([]byte(pivotDecisionOutput), &pivotDecision); err != nil {
+			if err := json.Unmarshal([]byte(extractJSON(pivotDecisionOutput)), &pivotDecision); err != nil {
 				log.Printf("[PIPELINE] Failed to parse pivot decision: %v, using target from classifier", err)
 				pivotDecision.Decision = "execute"
 				pivotDecision.SelectedToolkit = classification.TargetToolkit
@@ -379,7 +379,7 @@ func runPipeline(
 			}
 
 			var decision OrchestratorDecision
-			if err := json.Unmarshal([]byte(orchestratorOutput), &decision); err != nil {
+			if err := json.Unmarshal([]byte(extractJSON(orchestratorOutput)), &decision); err != nil {
 				log.Printf("[PIPELINE] Failed to parse orchestrator decision: %v, defaulting to summarize", err)
 				decision.Decision = "summarize"
 			}
@@ -503,7 +503,7 @@ func runEntityExtraction(ctx agent.InvocationContext, m model.LLM, yield func(*s
 
 	if extractorOutput != "" {
 		var extracted ExtractedEntities
-		if err := json.Unmarshal([]byte(extractorOutput), &extracted); err != nil {
+		if err := json.Unmarshal([]byte(extractJSON(extractorOutput)), &extracted); err != nil {
 			log.Printf("[PIPELINE] Failed to parse extracted entities: %v", err)
 		} else {
 			updateEntityIndex(ctx, &extracted, yield)
@@ -519,7 +519,7 @@ func checkGuardrailsFromOutput(guardrailsOutput string, yield func(*session.Even
 	}
 
 	var result GuardrailsResult
-	if err := json.Unmarshal([]byte(guardrailsOutput), &result); err != nil {
+	if err := json.Unmarshal([]byte(extractJSON(guardrailsOutput)), &result); err != nil {
 		log.Printf("[GUARDRAILS] Failed to parse result: %v, assuming passed", err)
 		return false
 	}
@@ -610,4 +610,28 @@ func isGreeting(msg string) bool {
 		}
 	}
 	return false
+}
+
+// extractJSON extracts JSON from a string that may be wrapped in markdown code blocks.
+// Handles formats like: ```json\n{...}\n``` or ```\n{...}\n``` or raw JSON.
+func extractJSON(s string) string {
+	s = strings.TrimSpace(s)
+
+	// Check for ```json or ``` prefix
+	if strings.HasPrefix(s, "```") {
+		// Find end of first line (after ```json or ```)
+		firstNewline := strings.Index(s, "\n")
+		if firstNewline != -1 {
+			s = s[firstNewline+1:]
+		}
+
+		// Find closing ```
+		if idx := strings.LastIndex(s, "```"); idx != -1 {
+			s = s[:idx]
+		}
+
+		s = strings.TrimSpace(s)
+	}
+
+	return s
 }

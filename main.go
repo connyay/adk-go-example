@@ -4,25 +4,25 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/connyay/adk-go-example/adkanthropic"
 	"github.com/connyay/adk-go-example/adkopenai"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
 
 func main() {
 	ctx := context.Background()
 
-	modelName := os.Getenv("OPENAI_MODEL")
-	if modelName == "" {
-		modelName = "gpt-4o-mini"
+	m, err := createModel()
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
 	}
-
-	log.Printf("Using model: %s", modelName)
-
-	m := adkopenai.NewModel(modelName, nil)
 
 	// Build the pipeline
 	pipeline, err := buildPipeline(m)
@@ -67,5 +67,30 @@ func main() {
 
 	if err = l.Execute(ctx, config, args); err != nil {
 		log.Fatalf("Launcher failed: %v", err)
+	}
+}
+
+// createModel creates the appropriate LLM backend based on MODEL_BACKEND env var.
+// Supported backends: "openai" (default), "anthropic"
+func createModel() (model.LLM, error) {
+	backend := strings.ToLower(os.Getenv("MODEL_BACKEND"))
+
+	switch backend {
+	case "anthropic":
+		modelName := os.Getenv("ANTHROPIC_MODEL")
+		if modelName == "" {
+			modelName = "claude-sonnet-4-5-20250929"
+		}
+		log.Printf("Using Anthropic backend with model: %s", modelName)
+		return adkanthropic.NewModel(anthropic.Model(modelName), nil)
+
+	default:
+		// Default to OpenAI
+		modelName := os.Getenv("OPENAI_MODEL")
+		if modelName == "" {
+			modelName = "gpt-4o-mini"
+		}
+		log.Printf("Using OpenAI backend with model: %s", modelName)
+		return adkopenai.NewModel(modelName, nil), nil
 	}
 }
