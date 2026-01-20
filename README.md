@@ -1,6 +1,6 @@
 # ADK Go Example
 
-A multi-agent research assistant built with [Google ADK (Agent Development Kit)](https://google.github.io/adk-go/). Demonstrates dynamic toolkit loading, parallel agent execution, entity persistence, and intelligent message routing.
+A multi-agent research assistant built with [Google ADK (Agent Development Kit)](https://github.com/google/adk-go). Demonstrates dynamic toolkit loading, parallel agent execution, entity persistence, and intelligent message routing.
 
 ## Features
 
