@@ -200,6 +200,21 @@ func runPipeline(
 		runFullPath := false
 
 		switch classification.Classification {
+		case "resume_plan":
+			// RESUME PATH: Continue executing an active plan
+			log.Printf("[PIPELINE] -> Resume Path (continuing active plan)")
+			if hasActivePlan(ctx) {
+				plan := getTaskPlan(ctx)
+				if plan != nil {
+					log.Printf("[PIPELINE] Resuming plan %s", plan.ID)
+					runTaskLoop(ctx, m, plan, toolkitAgentReg, yield)
+					return
+				}
+			}
+			// No active plan to resume, fall back to full path
+			log.Printf("[PIPELINE] No active plan to resume, falling back to full path")
+			runFullPath = true
+
 		case "followup":
 			// FAST PATH: Skip intake, go directly to active toolkit
 			log.Printf("[PIPELINE] -> Fast Path (followup to current toolkit)")
@@ -323,7 +338,7 @@ func runPipeline(
 		}
 
 		if runFullPath {
-			// FULL PATH: parallel intake (guardrails + search) -> check guardrails -> orchestrator -> route
+			// FULL PATH: parallel intake (guardrails + search) -> check guardrails -> complexity gate -> orchestrator/planner -> route
 			log.Printf("[PIPELINE] -> Full Path (new query)")
 
 			// Capture from event stream since state isn't committed yet
@@ -355,6 +370,105 @@ func runPipeline(
 				return
 			}
 
+			// Run complexity gate to determine if planning is needed
+			log.Printf("[PIPELINE] Running complexity gate")
+			complexityGate, err := buildComplexityGate(m, tkReg)
+			if err != nil {
+				log.Printf("[PIPELINE] Failed to build complexity gate: %v, proceeding with orchestrator", err)
+			}
+
+			var complexityOutput string
+			var complexity ComplexityAssessment
+			if complexityGate != nil {
+				for event, err := range complexityGate.Run(ctx) {
+					if err != nil {
+						if !yield(event, err) {
+							return
+						}
+						continue
+					}
+
+					if event.Content != nil {
+						for _, part := range event.Content.Parts {
+							if part.Text != "" {
+								complexityOutput = part.Text
+							}
+						}
+					}
+
+					if !yield(event, nil) {
+						return
+					}
+				}
+
+				if err := json.Unmarshal([]byte(extractJSON(complexityOutput)), &complexity); err != nil {
+					log.Printf("[PIPELINE] Failed to parse complexity assessment: %v, defaulting to simple", err)
+					complexity = ComplexityAssessment{IsComplex: false, SuggestedApproach: "direct"}
+				}
+
+				log.Printf("[PIPELINE] Complexity assessment: complex=%v approach=%s indicators=%v",
+					complexity.IsComplex, complexity.SuggestedApproach, complexity.Indicators)
+			}
+
+			// If complex, run planner and task loop
+			if complexity.IsComplex && complexity.SuggestedApproach == "planned" {
+				log.Printf("[PIPELINE] -> Planned Path (complex request)")
+
+				planner, err := buildPlannerAgent(m, tkReg)
+				if err != nil {
+					log.Printf("[PIPELINE] Failed to build planner: %v, falling back to orchestrator", err)
+				} else {
+					var plannerOutput string
+					for event, err := range planner.Run(ctx) {
+						if err != nil {
+							if !yield(event, err) {
+								return
+							}
+							continue
+						}
+
+						if event.Content != nil {
+							for _, part := range event.Content.Parts {
+								if part.Text != "" {
+									plannerOutput = part.Text
+								}
+							}
+						}
+
+						if !yield(event, nil) {
+							return
+						}
+					}
+
+					var plan TaskPlan
+					if err := json.Unmarshal([]byte(extractJSON(plannerOutput)), &plan); err != nil {
+						log.Printf("[PIPELINE] Failed to parse task plan: %v, falling back to orchestrator", err)
+					} else {
+						// Initialize and run the plan
+						initializePlan(&plan, userMessage)
+						log.Printf("[PIPELINE] Created plan %s with %d tasks: %s", plan.ID, len(plan.Tasks), plan.Summary)
+
+						// Emit plan created message
+						planMsg := fmt.Sprintf("Plan created: %s (%d tasks)", plan.Summary, len(plan.Tasks))
+						planEvent := &session.Event{
+							Author: "Planner",
+							LLMResponse: model.LLMResponse{
+								Content: &genai.Content{
+									Role:  "model",
+									Parts: []*genai.Part{{Text: planMsg}},
+								},
+							},
+						}
+						yield(planEvent, nil)
+
+						// Run task loop
+						runTaskLoop(ctx, m, &plan, toolkitAgentReg, yield)
+						return
+					}
+				}
+			}
+
+			// Simple path: run orchestrator
 			log.Printf("[PIPELINE] Running orchestrator")
 			var orchestratorOutput string
 			for event, err := range orchestrator.Run(ctx) {

@@ -172,3 +172,58 @@ type ExtractedEntities struct {
 	NewEntities     []EntityReference `json:"new_entities"`
 	DefaultReferent string            `json:"default_referent"`
 }
+
+// TaskStatus represents the current state of a task in a plan.
+type TaskStatus string
+
+const (
+	TaskStatusPending    TaskStatus = "pending"
+	TaskStatusInProgress TaskStatus = "in_progress"
+	TaskStatusCompleted  TaskStatus = "completed"
+	TaskStatusFailed     TaskStatus = "failed"
+	TaskStatusBlocked    TaskStatus = "blocked"
+)
+
+// ComplexityAssessment is the output from the ComplexityGate agent.
+type ComplexityAssessment struct {
+	IsComplex         bool     `json:"is_complex"`
+	Reasoning         string   `json:"reasoning"`
+	ComponentCount    int      `json:"component_count"`
+	Indicators        []string `json:"indicators"`
+	SuggestedApproach string   `json:"suggested_approach"` // "direct" | "planned"
+}
+
+// PlanTask represents a single task within a TaskPlan.
+type PlanTask struct {
+	ID          string                 `json:"id"`
+	Description string                 `json:"description"`
+	Toolkit     string                 `json:"toolkit"`
+	Action      string                 `json:"action"`
+	Parameters  map[string]interface{} `json:"parameters"`
+	DependsOn   []string               `json:"depends_on"`
+	Status      TaskStatus             `json:"status"`
+	ResultRef   string                 `json:"result_ref"`
+	Error       string                 `json:"error,omitempty"`
+	StartedAt   string                 `json:"started_at,omitempty"`
+	CompletedAt string                 `json:"completed_at,omitempty"`
+}
+
+// TaskPlan represents a decomposed plan for complex multi-step requests.
+type TaskPlan struct {
+	ID              string     `json:"id"`
+	OriginalRequest string     `json:"original_request"`
+	Summary         string     `json:"summary"`
+	Tasks           []PlanTask `json:"tasks"`
+	CurrentTaskIdx  int        `json:"current_task_idx"`
+	Status          TaskStatus `json:"status"`
+	CreatedAt       string     `json:"created_at"`
+}
+
+// TaskProgress represents the current progress through a task plan.
+type TaskProgress struct {
+	PlanID          string `json:"plan_id"`
+	TotalTasks      int    `json:"total_tasks"`
+	CompletedTasks  int    `json:"completed_tasks"`
+	CurrentTask     string `json:"current_task"`
+	PercentComplete int    `json:"percent_complete"`
+}

@@ -58,6 +58,24 @@ var (
 		Key:         "extracted_entities",
 		Description: "Newly extracted entities from entity extractor",
 	}
+
+	// TaskPlan holds the decomposed task plan for complex multi-step requests.
+	TaskPlan = StateKey{
+		Key:         "task_plan",
+		Description: "Decomposed task plan for complex multi-step requests",
+	}
+
+	// TaskProgress holds the current progress through the task plan.
+	TaskProgress = StateKey{
+		Key:         "task_progress",
+		Description: "Current progress through the task plan",
+	}
+
+	// ComplexityResult holds the assessment of request complexity from ComplexityGate.
+	ComplexityResult = StateKey{
+		Key:         "complexity_result",
+		Description: "Assessment of request complexity from ComplexityGate",
+	}
 )
 
 // AllKeys returns all defined state keys.
@@ -71,6 +89,9 @@ func AllKeys() []StateKey {
 		FinalResponse,
 		EntityIndex,
 		ExtractedEntities,
+		TaskPlan,
+		TaskProgress,
+		ComplexityResult,
 	}
 }
 

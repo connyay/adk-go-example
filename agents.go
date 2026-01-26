@@ -31,7 +31,7 @@ func buildIntakeClassifier(m model.LLM, ctx agent.InvocationContext, tkReg *tool
 
 ## Classification Rules
 
-Classify the message into one of three categories:
+Classify the message into one of four categories:
 
 1. "new_query" - Use when:
    - First message in conversation
@@ -55,6 +55,12 @@ Classify the message into one of three categories:
      - "extract insights from that" (export to analysis)
    - User references prior context but wants a fundamentally different action type
 
+4. "resume_plan" - Use when:
+   - User wants to continue an interrupted multi-step plan
+   - Examples: "continue", "resume", "go on", "next step", "keep going", "proceed"
+   - User confirms they want to proceed with the existing plan
+   - Only use if there's an active plan in progress
+
 ## Entity Resolution
 
 If the user references something from a previous turn (e.g., "the report", "that topic", "those insights"):
@@ -66,8 +72,8 @@ For pronouns like "it", "that", "this" - resolve to the default_referent if avai
 
 ## Output JSON:
 {
-  "classification": "new_query" | "followup" | "pivot",
-  "topic": "main subject (can be 'continuation' for followups)",
+  "classification": "new_query" | "followup" | "pivot" | "resume_plan",
+  "topic": "main subject (can be 'continuation' for followups/resume_plan)",
   "intent": "what they want",
   "keywords": ["search", "terms"],
   "reasoning": "brief explanation",
@@ -81,7 +87,8 @@ For pronouns like "it", "that", "this" - resolve to the default_referent if avai
 CRITICAL RULES:
 - Short confirmations like "yes", "ok", "sure", "use defaults" are ALWAYS "followup"
 - "export to PDF/CSV" or "create presentation" after analysis work = "pivot" (toolkit switch)
-- "generate report" or "compare" after export work = "pivot" (toolkit switch)`, entityContext, toolkitsPrompt),
+- "generate report" or "compare" after export work = "pivot" (toolkit switch)
+- "continue", "resume", "go on", "next step", "proceed" when there's an active plan = "resume_plan"`, entityContext, toolkitsPrompt),
 		OutputKey: state.IntakeClassification.Key,
 	})
 }
@@ -465,4 +472,132 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func buildComplexityGate(m model.LLM, tkReg *toolkit.ToolkitRegistry) (agent.Agent, error) {
+	toolkitsPrompt := tkReg.GetAvailableToolkitsPrompt()
+
+	return llmagent.New(llmagent.Config{
+		Name:        "ComplexityGate",
+		Description: "Assesses request complexity to determine if planning is needed",
+		Model:       m,
+		Instruction: fmt.Sprintf(`You are a complexity assessor. Analyze the user's request to determine if it requires task planning or can be handled directly.
+
+%s
+
+## Complexity Indicators
+
+A request is COMPLEX (requires planning) when 2+ of these are present:
+1. **Multiple distinct outputs**: Request asks for multiple deliverables (e.g., report AND export AND presentation)
+2. **Sequential dependencies**: Later steps need results from earlier steps
+3. **Multiple toolkits**: Request spans different toolkits (e.g., analysis AND export)
+4. **Conditional logic**: Request includes "if X then Y, otherwise Z" patterns
+5. **Large scope**: Comprehensive analysis of multiple topics or extensive processing
+
+## Examples
+
+SIMPLE requests (direct path):
+- "Generate a report on cloud computing" → single toolkit, single output
+- "Export the report to PDF" → single toolkit, single output
+- "Compare these two topics" → single toolkit, single output
+
+COMPLEX requests (planned path):
+- "Research quantum computing, generate a report, and export to PDF" → 2 toolkits, 3 steps, sequential
+- "Analyze AI trends, extract insights, and create a presentation" → multiple outputs, dependencies
+- "Generate reports on cloud, AI, and blockchain, then combine them" → multiple outputs, large scope
+
+## Output JSON
+
+{
+  "is_complex": true | false,
+  "reasoning": "brief explanation of assessment",
+  "component_count": N,
+  "indicators": ["indicator1", "indicator2"],
+  "suggested_approach": "direct" | "planned"
+}
+
+Rules:
+- If 0-1 indicators → suggested_approach: "direct"
+- If 2+ indicators → suggested_approach: "planned"
+- Always list which specific indicators were detected`, toolkitsPrompt),
+		OutputKey: state.ComplexityResult.Key,
+	})
+}
+
+func buildPlannerAgent(m model.LLM, tkReg *toolkit.ToolkitRegistry) (agent.Agent, error) {
+	toolkitsPrompt := tkReg.GetAvailableToolkitsPrompt()
+	stateDoc := state.FormatStateAccess([]string{
+		state.ComplexityResult.Key,
+		state.DocResults.Key,
+		state.StrategyResults.Key,
+		state.EntityIndex.Key,
+	})
+
+	return llmagent.New(llmagent.Config{
+		Name:        "Planner",
+		Description: "Creates task plans for complex multi-step requests",
+		Model:       m,
+		Instruction: fmt.Sprintf(`You are a task planner. Create a structured plan to fulfill complex user requests.
+
+%s
+
+%s
+
+## Planning Rules
+
+1. **One task per toolkit action**: Each task should map to exactly ONE toolkit action
+2. **Use depends_on for ordering**: Express sequential dependencies between tasks
+3. **Reference placeholders**: Later tasks can reference earlier results via {{task_N.result}} placeholders
+4. **Keep plans concise**: Most plans should have 2-4 tasks (don't over-decompose)
+
+## Task Structure
+
+Each task must specify:
+- id: Unique identifier (task_1, task_2, etc.)
+- description: What this task accomplishes
+- toolkit: Which toolkit to use (from available toolkits)
+- action: What action to take (generate_report, export_pdf, extract_insights, etc.)
+- parameters: Input parameters for the action
+- depends_on: Array of task IDs that must complete first (empty for first tasks)
+
+## Output JSON
+
+{
+  "id": "plan_<random_id>",
+  "original_request": "the user's original request",
+  "summary": "brief description of what this plan accomplishes",
+  "tasks": [
+    {
+      "id": "task_1",
+      "description": "Generate analysis report on the topic",
+      "toolkit": "analysis",
+      "action": "generate_report",
+      "parameters": {"topic": "the topic"},
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "task_2",
+      "description": "Export report to PDF",
+      "toolkit": "export",
+      "action": "export_pdf",
+      "parameters": {"content_ref": "{{task_1.result}}"},
+      "depends_on": ["task_1"],
+      "status": "pending"
+    }
+  ],
+  "current_task_idx": 0,
+  "status": "pending",
+  "created_at": ""
+}
+
+## Parameter Placeholders
+
+Use these placeholder formats in parameters:
+- {{task_N.result}} - Reference the result entity ID from task N
+- {{entity_XXX}} - Reference an existing entity from entity_index
+
+The task runner will resolve these to actual entity IDs before execution.`, stateDoc, toolkitsPrompt),
+		OutputKey: state.TaskPlan.Key,
+	})
 }
